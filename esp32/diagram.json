@@ -1,0 +1,96 @@
+{
+  "version": 1,
+  "author": "IoT Skill Lab",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "board-esp32-devkit-c-v4", "id": "esp", "top": 120, "left": 0, "attrs": {} },
+    {
+      "type": "wokwi-lcd1602",
+      "id": "lcd1",
+      "top": -348.8,
+      "left": 130.4,
+      "attrs": { "pins": "i2c" }
+    },
+    {
+      "type": "wokwi-servo",
+      "id": "servo1",
+      "top": -154.6,
+      "left": 299.4,
+      "rotate": 270,
+      "attrs": { "hornColor": "red" }
+    },
+    {
+      "type": "wokwi-hc-sr04",
+      "id": "gate_ultrasonic",
+      "top": 59.1,
+      "left": 312.7,
+      "attrs": { "distance": "400" }
+    },
+    {
+      "type": "wokwi-hc-sr04",
+      "id": "ultrasonic1",
+      "top": -200.1,
+      "left": -416.9,
+      "attrs": { "distance": "400" }
+    },
+    { "type": "wokwi-hc-sr04", "id": "ultrasonic2", "top": -75.3, "left": -416.9, "attrs": {} },
+    { "type": "wokwi-hc-sr04", "id": "ultrasonic3", "top": 40, "left": -420, "attrs": {} },
+    { "type": "wokwi-hc-sr04", "id": "ultrasonic4", "top": 160, "left": -420, "attrs": {} },
+    { "type": "wokwi-hc-sr04", "id": "ultrasonic5", "top": 280, "left": -420, "attrs": {} },
+    {
+      "type": "wokwi-led",
+      "id": "led_yellow",
+      "top": 160,
+      "left": 150,
+      "attrs": { "color": "yellow" }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led_green",
+      "top": 160,
+      "left": 200,
+      "attrs": { "color": "green" }
+    },
+    { "type": "wokwi-led", "id": "led_red", "top": 160, "left": 250, "attrs": { "color": "red" } }
+  ],
+  "connections": [
+    [ "esp:GND.1", "lcd1:GND", "black", [ "v-4.8", "h-23.81", "v-585.6" ] ],
+    [ "esp:5V", "lcd1:VCC", "red", [ "h-52.61", "v-628.9" ] ],
+    [ "esp:21", "lcd1:SDA", "green", [ "v0" ] ],
+    [ "esp:22", "lcd1:SCL", "yellow", [ "v0" ] ],
+    [ "esp:GND.1", "servo1:GND", "black", [ "v-4.8", "h-33.41", "v-240", "h441.6" ] ],
+    [ "esp:5V", "servo1:V+ ", "red", [ "v0" ] ],
+    [ "esp:18", "servo1:PWM", "orange", [ "v-216", "h331.04" ] ],
+    [ "esp:GND.1", "gate_ultrasonic:GND", "black", [ "v0" ] ],
+    [ "esp:5V", "gate_ultrasonic:VCC", "red", [ "v0" ] ],
+    [ "esp:5", "gate_ultrasonic:TRIG", "blue", [ "v0" ] ],
+    [ "esp:19", "gate_ultrasonic:ECHO", "cyan", [ "v0" ] ],
+    [ "esp:GND.1", "led_yellow:C", "black", [ "v0" ] ],
+    [ "esp:2", "led_yellow:A", "yellow", [ "v0" ] ],
+    [ "esp:GND.1", "led_green:C", "black", [ "v0" ] ],
+    [ "esp:15", "led_green:A", "green", [ "v0" ] ],
+    [ "esp:GND.1", "led_red:C", "black", [ "v0" ] ],
+    [ "esp:13", "led_red:A", "red", [ "v0" ] ],
+    [ "esp:GND.1", "ultrasonic1:GND", "black", [ "v0" ] ],
+    [ "esp:5V", "ultrasonic1:VCC", "red", [ "v0" ] ],
+    [ "esp:12", "ultrasonic1:TRIG", "blue", [ "v0" ] ],
+    [ "esp:14", "ultrasonic1:ECHO", "cyan", [ "v0" ] ],
+    [ "esp:GND.1", "ultrasonic2:GND", "black", [ "v0" ] ],
+    [ "esp:5V", "ultrasonic2:VCC", "red", [ "v0" ] ],
+    [ "esp:27", "ultrasonic2:TRIG", "blue", [ "v0" ] ],
+    [ "esp:26", "ultrasonic2:ECHO", "cyan", [ "v0" ] ],
+    [ "esp:GND.1", "ultrasonic3:GND", "black", [ "v0" ] ],
+    [ "esp:5V", "ultrasonic3:VCC", "red", [ "v0" ] ],
+    [ "esp:25", "ultrasonic3:TRIG", "blue", [ "v0" ] ],
+    [ "esp:33", "ultrasonic3:ECHO", "cyan", [ "v0" ] ],
+    [ "esp:GND.1", "ultrasonic4:GND", "black", [ "v0" ] ],
+    [ "esp:5V", "ultrasonic4:VCC", "red", [ "v0" ] ],
+    [ "esp:32", "ultrasonic4:TRIG", "blue", [ "v0" ] ],
+    [ "esp:16", "ultrasonic4:ECHO", "cyan", [ "v0" ] ],
+    [ "esp:GND.1", "ultrasonic5:GND", "black", [ "h-14.21", "v100.8", "h-309.1" ] ],
+    [ "esp:5V", "ultrasonic5:VCC", "red", [ "v0" ] ],
+    [ "esp:4", "ultrasonic5:TRIG", "blue", [ "v0" ] ],
+    [ "esp:17", "ultrasonic5:ECHO", "cyan", [ "v0" ] ]
+  ],
+  "dependencies": {}
+}
