@@ -1,23 +1,14 @@
-"""
-IoT Smart Parking & Vehicle Monitoring System  (ESP32 + MicroPython, Wokwi)
+# IoT smart parking - ESP32 + MicroPython (Wokwi)
+# 5 bay sensors, entry gate, exit gate, LCD and 3 LEDs.
+# Sends everything to MQTT and takes bookings from a phone.
+#
+# topics (all under BASE_TOPIC):
+#   status  - online / offline (retained, offline is the last will)
+#   slots   - live snapshot (retained)
+#   events  - entry, exit, gate_open, gate_exit, denied_full, booked ...
+#   reserve - commands coming in: {"action": "reserve|arrive|cancel", "name": "..."}
+#   reply   - answer sent back to the phone
 
-Features
-  * 5 slot sensors + 1 entry-gate sensor (HC-SR04)
-  * Median-of-3 filtering + time-based debounce (no flickering slots)
-  * Non-blocking gate state machine (barrier only closes after the car has passed)
-  * Bay reservation: a bay assigned at the gate is held for RESERVE_TIMEOUT_MS
-    so two cars are never sent to the same bay
-  * Vehicle monitoring: entry / exit time, duration and fee per vehicle
-  * WiFi + MQTT publishing (works offline, buffers events, auto-reconnects)
-
-MQTT topics (all under BASE_TOPIC)
-  status   (retained)  "online" / "offline"  (offline is sent as Last Will)
-  slots    (retained)  live snapshot: free count, per-slot state, gate, totals
-  events               entry / exit / gate_open / denied_full / reservation_expired
-                       booked / booking_cancelled / booking_refused
-  reserve  (incoming)  phone commands {"action":"reserve|arrive|cancel","name":"..."}
-  reply                answer to the phone: ok, slot, reason
-"""
 import time
 import json
 import machine
@@ -25,138 +16,63 @@ import network
 from machine import Pin, PWM, I2C
 from esp32_i2c_lcd import I2cLcd
 
-# ==========================================
-# 1. CONFIGURATION
-# ==========================================
-
 TOTAL_SLOTS = 5
 
-# Distance rules (cm).
-# NOTE: 300 cm suits the Wokwi demo (idle sensors read 400 cm). On real hardware
-# mount sensors above each bay and use roughly 30-150 cm depending on mounting.
-OCCUPIED_THRESHOLD_CM = 300.0   # slot occupied when filtered reading <= this
-GATE_THRESHOLD_CM = 10.0        # car at entry gate when filtered reading <= this
+OCCUPIED_CM = 300        # ok for wokwi (idle sensor reads 400), use ~30-150 on a real build
+GATE_CM = 10             # car is at a gate when closer than this
 
-# Timing (ms)
-SLOT_DEBOUNCE_MS = 2000         # a slot must read the new state this long to change
-GATE_DEBOUNCE_MS = 500          # a car must be at the gate this long to be counted
-GATE_CLEAR_MS = 1500            # gate sensor must be clear this long before closing
-MIN_OPEN_MS = 2000              # barrier stays open at least this long
-RESERVE_TIMEOUT_MS = 60000      # bay assigned at the gate is held this long
-PHONE_HOLD_MS = 300000          # bay booked from a phone is held this long (5 min)
-HEARTBEAT_MS = 10000            # publish a status snapshot at least this often
-RECONNECT_MS = 15000            # retry WiFi/MQTT this often while offline
-LOOP_DELAY_MS = 50
+# times in ms
+SLOT_DEBOUNCE = 2000     # bay must read the new state this long before we believe it
+GATE_DEBOUNCE = 500
+GATE_CLEAR = 1500        # gate sensor must be clear this long before the barrier closes
+MIN_OPEN = 2000
+GATE_HOLD = 60000        # bay given at the gate is kept for 1 min
+PHONE_HOLD = 300000      # bay booked on the phone is kept for 5 min
+HEARTBEAT = 10000
+RECONNECT = 15000
 
-# Billing (demo rate: per started minute so it is visible in a short simulation)
-RATE_PER_MIN = 1
+RATE_PER_MIN = 1         # low on purpose so you see a fee in a short simulation
+MAX_BILLS = 10           # cars that left a bay but haven't reached the exit yet
 
-# Servo angles
-SERVO_CLOSED = 0
-SERVO_OPEN = 90
+OPEN_ANGLE = 90
+CLOSED_ANGLE = 0
 
-# WiFi / MQTT  (Wokwi provides the open "Wokwi-GUEST" network with internet access)
 WIFI_SSID = "Wokwi-GUEST"
 WIFI_PASSWORD = ""
-MQTT_BROKER = "broker.hivemq.com"   # public broker: anyone can read your topics!
+MQTT_BROKER = "broker.hivemq.com"      # public broker, anyone can read the topics
 MQTT_PORT = 1883
-BASE_TOPIC = "iot_parking_skillLab/lot1"   # <-- make this unique to you
+BASE_TOPIC = "iot_parking_skillLab/lot1"
 
-# ==========================================
-# 2. HARDWARE SETUP  (pins unchanged from your diagram.json)
-# ==========================================
+IDLE, OPEN, DENIED = 0, 1, 2
+STATE_NAMES = ("idle", "open", "denied")
 
-# I2C LCD (SCL: GPIO 22, SDA: GPIO 21)
+
+# ---- hardware ----
+
 i2c = I2C(0, scl=Pin(22), sda=Pin(21), freq=100000)
-devices = i2c.scan()
-lcd_addr = devices[0] if devices else 0x27
-lcd = I2cLcd(i2c, lcd_addr, 2, 16)
+found = i2c.scan()
+lcd = I2cLcd(i2c, found[0] if found else 0x27, 2, 16)
 
-# Status LEDs
-led_yellow = Pin(2, Pin.OUT)    # idle, space available
-led_green = Pin(15, Pin.OUT)    # gate open, car being admitted
-led_red = Pin(13, Pin.OUT)      # parking full
+led_yellow = Pin(2, Pin.OUT)    # idle, space free
+led_green = Pin(15, Pin.OUT)    # a gate is open
+led_red = Pin(13, Pin.OUT)      # full
 
-# Servo barrier on GPIO 18
-servo_pwm = PWM(Pin(18), freq=50)
+entry_servo = PWM(Pin(18), freq=50)
+exit_servo = PWM(Pin(23), freq=50)
 
 
-def set_servo_angle(angle):
-    """Sets servo position (0 to 180 degrees)."""
-    duty = int(1800 + (angle / 180.0) * 6200)
-    servo_pwm.duty_u16(duty)
+def move_servo(servo, angle):
+    servo.duty_u16(int(1800 + angle / 180 * 6200))
 
 
-# Entry gate sensor (Trig: GPIO 5, Echo: GPIO 19)
-gate_trig = Pin(5, Pin.OUT)
-gate_echo = Pin(19, Pin.IN)
-gate_trig.value(0)
-
-# Slot sensors (Trig, Echo)
-slot_pins = [(12, 14), (27, 26), (25, 33), (32, 16), (4, 17)]
-ultrasonic_sensors = []
-for trig_pin, echo_pin in slot_pins:
-    trig = Pin(trig_pin, Pin.OUT)
-    echo = Pin(echo_pin, Pin.IN)
-    trig.value(0)
-    ultrasonic_sensors.append((trig, echo))
-
-# ==========================================
-# 3. STATE
-# ==========================================
-
-# Slots
-slot_occupied = [False] * TOTAL_SLOTS      # confirmed (debounced) state
-slot_candidate = [False] * TOTAL_SLOTS     # state currently being observed
-slot_cand_since = [0] * TOTAL_SLOTS
-slot_hist = [[999.0] * 3 for _ in range(TOTAL_SLOTS)]
-slot_reserved = [False] * TOTAL_SLOTS
-slot_reserved_at = [0] * TOTAL_SLOTS
-slot_entry_ts = [0] * TOTAL_SLOTS
-slot_hold_ms = [RESERVE_TIMEOUT_MS] * TOTAL_SLOTS   # how long each reservation lasts
-slot_res_by = [None] * TOTAL_SLOTS                  # name of the phone user holding a bay
-arrivals = []                                       # bays whose owner tapped "I've arrived"
-
-# Gate
-G_IDLE, G_OPEN, G_DENIED = 0, 1, 2
-GATE_NAMES = ("idle", "open", "denied")
-gate_state = G_IDLE
-gate_hist = [999.0] * 3
-gate_present = False
-gate_cand = False
-gate_cand_since = 0
-gate_last_present = 0
-gate_opened_at = 0
-assigned_bay = None
-
-# Totals
-total_entries = 0
-total_denied = 0
-total_revenue = 0
-
-# Connectivity
-wlan = network.WLAN(network.STA_IF)
-mqtt = None
-mqtt_ok = False
-ntp_ok = False
-pending_events = []
-last_reconnect_ms = 0
-last_status_ms = 0
-status_sig = None
-lcd_cache = ["", ""]
-
-# ==========================================
-# 4. HELPERS
-# ==========================================
-
-
-def unix_now():
-    """MicroPython's epoch is 2000-01-01; convert to Unix time for dashboards."""
-    return int(time.time()) + 946684800
+def lights(yellow, green, red):
+    led_yellow.value(1 if yellow else 0)
+    led_green.value(1 if green else 0)
+    led_red.value(1 if red else 0)
 
 
 def read_distance(trig, echo):
-    """Measures distance in cm using pulse timing. Returns 999.0 on timeout."""
+    # returns cm, or 999 if the echo never comes back
     trig.value(0)
     time.sleep_us(2)
     trig.value(1)
@@ -174,46 +90,110 @@ def read_distance(trig, echo):
         if time.ticks_diff(time.ticks_us(), high_start) > timeout:
             return 999.0
 
-    duration = time.ticks_diff(time.ticks_us(), high_start)
-    return (duration * 0.0343) / 2
+    return time.ticks_diff(time.ticks_us(), high_start) * 0.0343 / 2
 
 
-def median3(values):
-    return sorted(values)[1]
+class Detector:
+    # one ultrasonic sensor with a median filter and a debounce,
+    # so a single bad reading can't flip a bay or open a gate
+    def __init__(self, trig_pin, echo_pin, limit_cm, debounce_ms):
+        self.trig = Pin(trig_pin, Pin.OUT)
+        self.echo = Pin(echo_pin, Pin.IN)
+        self.trig.value(0)
+        self.limit = limit_cm
+        self.debounce = debounce_ms
+        self.readings = [999.0, 999.0, 999.0]
+        self.state = False       # what we believe
+        self.maybe = False       # what the sensor says right now
+        self.since = 0
+        self.last_seen = 0
+
+    def update(self, now):
+        # returns True on the loop where self.state changes
+        self.readings.pop(0)
+        self.readings.append(read_distance(self.trig, self.echo))
+        close = sorted(self.readings)[1] <= self.limit
+
+        changed = False
+        if close != self.maybe:
+            self.maybe = close
+            self.since = now
+        elif close != self.state and time.ticks_diff(now, self.since) >= self.debounce:
+            self.state = close
+            changed = True
+        if self.state:
+            self.last_seen = now
+        return changed
 
 
-def set_led_status(yellow, green, red):
-    led_yellow.value(1 if yellow else 0)
-    led_green.value(1 if green else 0)
-    led_red.value(1 if red else 0)
+slot_pins = [(12, 14), (27, 26), (25, 33), (32, 16), (4, 17)]
+slots = [Detector(t, e, OCCUPIED_CM, SLOT_DEBOUNCE) for t, e in slot_pins]
+entry_sensor = Detector(5, 19, GATE_CM, GATE_DEBOUNCE)
+exit_sensor = Detector(0, 34, GATE_CM, GATE_DEBOUNCE)
 
 
-def lcd_show(row, text):
-    """Writes a 16-char line, only touching the LCD when the text changed."""
+# ---- state ----
+
+reserved = [False] * TOTAL_SLOTS
+res_time = [0] * TOTAL_SLOTS
+res_hold = [GATE_HOLD] * TOTAL_SLOTS
+res_name = [None] * TOTAL_SLOTS      # who booked it from the phone
+entry_time = [0] * TOTAL_SLOTS
+arrivals = []                        # bays whose owner pressed "I've arrived"
+bills = []                           # cars that left a bay, waiting to pay at the exit
+
+entry_state = IDLE
+entry_opened = 0
+next_bay = None
+
+exit_state = IDLE
+exit_opened = 0
+exit_bill = None
+
+n_entries = 0
+n_exits = 0
+n_denied = 0
+revenue = 0
+
+wlan = network.WLAN(network.STA_IF)
+mqtt = None
+mqtt_ok = False
+ntp_ok = False
+pending = []                         # events we couldn't send yet
+last_reconnect = 0
+last_status = 0
+last_sig = None
+lcd_text = ["", ""]
+
+
+def unix_now():
+    # micropython counts from 2000, dashboards want unix time
+    return int(time.time()) + 946684800
+
+
+def show(row, text):
+    # only rewrite the lcd when the text changed, avoids flicker
     text = (text + " " * 16)[:16]
-    if lcd_cache[row] != text:
+    if lcd_text[row] != text:
         lcd.move_to(0, row)
         lcd.putstr(text)
-        lcd_cache[row] = text
+        lcd_text[row] = text
 
 
-def slot_state(i):
-    if slot_occupied[i]:
+def bay_status(i):
+    if slots[i].state:
         return "occupied"
-    if slot_reserved[i]:
+    if reserved[i]:
         return "reserved"
     return "free"
 
 
-def available_slots():
-    """Bays that are neither occupied nor already assigned to an incoming car."""
-    return [i for i in range(TOTAL_SLOTS) if not slot_occupied[i] and not slot_reserved[i]]
+def free_bays():
+    return [i for i in range(TOTAL_SLOTS) if not slots[i].state and not reserved[i]]
 
 
-# ==========================================
-# 5. WIFI / MQTT  (all failures are non-fatal: the gate keeps working offline)
-# ==========================================
-
+# ---- wifi / mqtt ----
+# if any of this fails the gates keep working, we just retry later
 
 def wifi_connect(timeout_ms=10000):
     wlan.active(True)
@@ -235,7 +215,7 @@ def sync_time():
         ntptime.settime()
         ntp_ok = True
     except Exception as e:
-        print("NTP failed:", e)
+        print("ntp failed:", e)
         ntp_ok = False
 
 
@@ -252,148 +232,74 @@ def mqtt_connect():
         client.publish(BASE_TOPIC + "/status", "online", retain=True)
         mqtt = client
         mqtt_ok = True
-        print("MQTT connected")
+        print("mqtt connected")
     except Exception as e:
-        print("MQTT connect failed:", e)
+        print("mqtt connect failed:", e)
         mqtt_ok = False
     return mqtt_ok
 
 
-def mqtt_publish(subtopic, payload, retain=False):
+def send(subtopic, data, retain=False):
     global mqtt_ok
     if not mqtt_ok:
         return False
     try:
-        mqtt.publish(BASE_TOPIC + "/" + subtopic, json.dumps(payload), retain)
+        mqtt.publish(BASE_TOPIC + "/" + subtopic, json.dumps(data), retain)
         return True
     except Exception as e:
-        print("MQTT publish failed:", e)
+        print("publish failed:", e)
         mqtt_ok = False
         return False
 
 
-def publish_event(event):
-    """Sends an event now, or buffers it (max 20) if the cloud is unreachable."""
+def log_event(event):
     event["ts"] = unix_now()
     print("EVENT", event)
-    if not mqtt_publish("events", event):
-        if len(pending_events) >= 20:
-            pending_events.pop(0)
-        pending_events.append(event)
+    if not send("events", event):
+        if len(pending) >= 20:
+            pending.pop(0)
+        pending.append(event)
 
 
 def flush_pending():
-    while pending_events and mqtt_ok:
-        if mqtt_publish("events", pending_events[0]):
-            pending_events.pop(0)
+    while pending and mqtt_ok:
+        if send("events", pending[0]):
+            pending.pop(0)
         else:
             break
 
 
-def publish_status_if_needed(now):
-    """Retained snapshot: sent on any change and at least every HEARTBEAT_MS."""
-    global status_sig, last_status_ms
-    states = [slot_state(i) for i in range(TOTAL_SLOTS)]
-    sig = (tuple(states), gate_state)
-    if sig == status_sig and time.ticks_diff(now, last_status_ms) < HEARTBEAT_MS:
+def send_status(now):
+    # snapshot goes out when something changed, or every HEARTBEAT ms
+    global last_sig, last_status
+    states = [bay_status(i) for i in range(TOTAL_SLOTS)]
+    sig = (tuple(states), entry_state, exit_state, len(bills))
+    if sig == last_sig and time.ticks_diff(now, last_status) < HEARTBEAT:
         return
-    payload = {
+    data = {
         "ts": unix_now(),
         "time_synced": ntp_ok,
         "total": TOTAL_SLOTS,
-        "free": len(available_slots()),
+        "free": len(free_bays()),
         "slots": states,
-        "gate": GATE_NAMES[gate_state],
-        "entries": total_entries,
-        "denied": total_denied,
-        "revenue": total_revenue,
+        "gate": STATE_NAMES[entry_state],
+        "exit_gate": STATE_NAMES[exit_state],
+        "entries": n_entries,
+        "exits": n_exits,
+        "bills": len(bills),
+        "denied": n_denied,
+        "revenue": revenue,
     }
-    if mqtt_publish("slots", payload, retain=True):
-        status_sig = sig
-        last_status_ms = now
+    if send("slots", data, retain=True):
+        last_sig = sig
+        last_status = now
 
 
-# ---- phone reservations (commands arrive on BASE_TOPIC/reserve) ----
-
-
-def find_booking(name):
-    for i in range(TOTAL_SLOTS):
-        if slot_res_by[i] == name:
-            return i
-    return None
-
-
-def release_booking(i, why):
-    name = slot_res_by[i]
-    slot_reserved[i] = False
-    slot_res_by[i] = None
-    if i in arrivals:
-        arrivals.remove(i)
-    publish_event({"event": why, "slot": i + 1, "by": name})
-
-
-def reply(name, ok, **info):
-    info["name"] = name
-    info["ok"] = ok
-    mqtt_publish("reply", info)
-
-
-def handle_command(cmd):
-    now = time.ticks_ms()
-    name = str(cmd.get("name", "guest"))[:12]
-    action = cmd.get("action")
-    i = find_booking(name)
-    if action == "reserve":
-        if i is not None:
-            reply(name, True, slot=i + 1, note="already booked")
-            return
-        free = available_slots()
-        if not free:
-            reply(name, False, reason="lot full")
-            publish_event({"event": "booking_refused", "by": name})
-            return
-        i = free[0]
-        slot_reserved[i] = True
-        slot_reserved_at[i] = now
-        slot_hold_ms[i] = PHONE_HOLD_MS
-        slot_res_by[i] = name
-        reply(name, True, slot=i + 1, hold_s=PHONE_HOLD_MS // 1000)
-        publish_event({"event": "booked", "slot": i + 1, "by": name})
-    elif i is None:
-        reply(name, False, reason="no booking found")
-    elif action == "arrive":
-        if i not in arrivals:
-            arrivals.append(i)
-        reply(name, True, slot=i + 1, note="drive to the gate")
-    elif action == "cancel":
-        release_booking(i, "booking_cancelled")
-        reply(name, True, note="cancelled")
-
-
-def on_message(topic, msg):
-    try:
-        handle_command(json.loads(msg))
-    except Exception as e:
-        print("Bad command:", e)
-
-
-def poll_mqtt():
-    """Checks for incoming phone commands without waiting."""
-    global mqtt_ok
-    if not mqtt_ok:
+def reconnect(now):
+    global last_reconnect
+    if mqtt_ok or time.ticks_diff(now, last_reconnect) < RECONNECT:
         return
-    try:
-        mqtt.check_msg()
-    except Exception as e:
-        print("MQTT poll failed:", e)
-        mqtt_ok = False
-
-
-def maintain_connection(now):
-    global last_reconnect_ms
-    if mqtt_ok or time.ticks_diff(now, last_reconnect_ms) < RECONNECT_MS:
-        return
-    last_reconnect_ms = now
+    last_reconnect = now
     if not wlan.isconnected():
         wifi_connect(5000)
     if wlan.isconnected():
@@ -403,165 +309,244 @@ def maintain_connection(now):
             flush_pending()
 
 
-# ==========================================
-# 6. PARKING LOGIC
-# ==========================================
+# ---- phone bookings ----
+
+def find_booking(name):
+    for i in range(TOTAL_SLOTS):
+        if res_name[i] == name:
+            return i
+    return None
 
 
-def on_slot_change(i, occupied):
-    """Called once when a slot's debounced state flips. Logs entry / exit + fee."""
-    global total_entries, total_revenue
-    slot_occupied[i] = occupied
-    if occupied:
-        slot_reserved[i] = False            # the assigned car has arrived
-        slot_res_by[i] = None
+def drop_booking(i, why):
+    name = res_name[i]
+    reserved[i] = False
+    res_name[i] = None
+    if i in arrivals:
+        arrivals.remove(i)
+    log_event({"event": why, "slot": i + 1, "by": name})
+
+
+def reply(name, ok, **info):
+    info["name"] = name
+    info["ok"] = ok
+    send("reply", info)
+
+
+def handle_command(cmd):
+    name = str(cmd.get("name", "guest"))[:12]
+    action = cmd.get("action")
+    i = find_booking(name)
+
+    if action == "reserve":
+        if i is not None:
+            reply(name, True, slot=i + 1, note="already booked")
+            return
+        free = free_bays()
+        if not free:
+            reply(name, False, reason="lot full")
+            log_event({"event": "booking_refused", "by": name})
+            return
+        i = free[0]
+        reserved[i] = True
+        res_time[i] = time.ticks_ms()
+        res_hold[i] = PHONE_HOLD
+        res_name[i] = name
+        reply(name, True, slot=i + 1, hold_s=PHONE_HOLD // 1000)
+        log_event({"event": "booked", "slot": i + 1, "by": name})
+    elif i is None:
+        reply(name, False, reason="no booking found")
+    elif action == "arrive":
+        if i not in arrivals:
+            arrivals.append(i)
+        reply(name, True, slot=i + 1, note="drive to the gate")
+    elif action == "cancel":
+        drop_booking(i, "booking_cancelled")
+        reply(name, True, note="cancelled")
+    else:
+        reply(name, False, reason="unknown action")
+
+
+def on_message(topic, msg):
+    print("phone command:", msg)
+    try:
+        handle_command(json.loads(msg))
+    except Exception as e:
+        print("bad command:", e)
+
+
+def check_phone():
+    global mqtt_ok
+    if not mqtt_ok:
+        return
+    try:
+        mqtt.check_msg()       # doesn't wait if nothing is there
+    except Exception as e:
+        print("mqtt poll failed:", e)
+        mqtt_ok = False
+
+
+# ---- parking logic ----
+
+def slot_changed(i):
+    global n_entries
+    if slots[i].state:
+        # a car just parked
+        reserved[i] = False
+        res_name[i] = None
         if i in arrivals:
             arrivals.remove(i)
-        slot_entry_ts[i] = unix_now()
-        total_entries += 1
-        publish_event({"event": "entry", "slot": i + 1})
+        entry_time[i] = unix_now()
+        n_entries += 1
+        log_event({"event": "entry", "slot": i + 1})
     else:
-        exit_ts = unix_now()
-        duration = int(max(0, exit_ts - slot_entry_ts[i]))
-        minutes = max(1, (duration + 59) // 60)
-        fee = minutes * RATE_PER_MIN
-        total_revenue += fee
-        publish_event({
-            "event": "exit", "slot": i + 1,
-            "entry_ts": slot_entry_ts[i], "duration_s": duration, "fee": fee,
-        })
-
-
-def update_slot(i, now):
-    trig, echo = ultrasonic_sensors[i]
-    hist = slot_hist[i]
-    hist.pop(0)
-    hist.append(read_distance(trig, echo))
-    raw = median3(hist) <= OCCUPIED_THRESHOLD_CM
-
-    if raw != slot_candidate[i]:
-        slot_candidate[i] = raw
-        slot_cand_since[i] = now
-    elif raw != slot_occupied[i] and time.ticks_diff(now, slot_cand_since[i]) >= SLOT_DEBOUNCE_MS:
-        on_slot_change(i, raw)
-
-
-def update_gate_sensor(now):
-    global gate_present, gate_cand, gate_cand_since, gate_last_present
-    gate_hist.pop(0)
-    gate_hist.append(read_distance(gate_trig, gate_echo))
-    raw = median3(gate_hist) <= GATE_THRESHOLD_CM
-
-    if raw != gate_cand:
-        gate_cand = raw
-        gate_cand_since = now
-    elif raw != gate_present and time.ticks_diff(now, gate_cand_since) >= GATE_DEBOUNCE_MS:
-        gate_present = raw
-    if gate_present:
-        gate_last_present = now
+        # car left the bay, work out the bill and wait for it at the exit
+        secs = max(0, unix_now() - entry_time[i])
+        fee = max(1, (secs + 59) // 60) * RATE_PER_MIN
+        bills.append({"slot": i + 1, "duration_s": secs, "fee": fee})
+        if len(bills) > MAX_BILLS:
+            bills.pop(0)
+        log_event({"event": "exit", "slot": i + 1, "entry_ts": entry_time[i],
+                   "duration_s": secs, "fee": fee})
 
 
 def expire_reservations(now):
     for i in range(TOTAL_SLOTS):
-        if slot_reserved[i] and time.ticks_diff(now, slot_reserved_at[i]) > slot_hold_ms[i]:
-            release_booking(i, "reservation_expired")
+        if reserved[i] and time.ticks_diff(now, res_time[i]) > res_hold[i]:
+            drop_booking(i, "reservation_expired")
 
 
-def run_gate(now):
-    """Non-blocking entry-gate state machine: IDLE -> OPEN -> IDLE  /  IDLE -> DENIED -> IDLE."""
-    global gate_state, gate_opened_at, assigned_bay, total_denied
+def run_entry(now):
+    global entry_state, entry_opened, next_bay, n_denied
+    car = entry_sensor.state
 
-    if gate_state == G_IDLE:
-        if gate_present:
-            free = available_slots()
-            if arrivals or free:
-                # a car whose owner tapped "I've arrived" gets their booked bay first
-                bay = arrivals.pop(0) if arrivals else free[0]
-                slot_reserved[bay] = True
-                slot_reserved_at[bay] = now
-                slot_hold_ms[bay] = RESERVE_TIMEOUT_MS
-                assigned_bay = bay
-                gate_opened_at = now
-                gate_state = G_OPEN
-                set_servo_angle(SERVO_OPEN)
-                publish_event({"event": "gate_open", "slot": bay + 1})
-            else:
-                gate_state = G_DENIED
-                total_denied += 1
-                publish_event({"event": "denied_full"})
+    if entry_state == IDLE:
+        if not car:
+            return
+        free = free_bays()
+        if arrivals or free:
+            # someone who pressed "arrived" gets their own bay first
+            bay = arrivals.pop(0) if arrivals else free[0]
+            reserved[bay] = True
+            res_time[bay] = now
+            res_hold[bay] = GATE_HOLD
+            next_bay = bay
+            entry_opened = now
+            entry_state = OPEN
+            move_servo(entry_servo, OPEN_ANGLE)
+            log_event({"event": "gate_open", "slot": bay + 1})
+        else:
+            entry_state = DENIED
+            n_denied += 1
+            log_event({"event": "denied_full"})
 
-    elif gate_state == G_OPEN:
-        # Safety: never close while the car is still in front of the sensor
-        if (time.ticks_diff(now, gate_opened_at) >= MIN_OPEN_MS
-                and time.ticks_diff(now, gate_last_present) >= GATE_CLEAR_MS):
-            set_servo_angle(SERVO_CLOSED)
-            assigned_bay = None
-            gate_state = G_IDLE
+    elif entry_state == OPEN:
+        # don't close on the car
+        if (time.ticks_diff(now, entry_opened) >= MIN_OPEN
+                and time.ticks_diff(now, entry_sensor.last_seen) >= GATE_CLEAR):
+            move_servo(entry_servo, CLOSED_ANGLE)
+            next_bay = None
+            entry_state = IDLE
 
-    elif gate_state == G_DENIED:
-        # Wait for the refused car to leave before accepting a new one
-        if not gate_present and time.ticks_diff(now, gate_last_present) >= GATE_CLEAR_MS:
-            gate_state = G_IDLE
+    elif entry_state == DENIED:
+        # wait until the refused car has gone
+        if not car and time.ticks_diff(now, entry_sensor.last_seen) >= GATE_CLEAR:
+            entry_state = IDLE
+
+
+def run_exit(now):
+    # a car only gets out if there's a bill waiting for it
+    global exit_state, exit_opened, exit_bill, n_exits, revenue
+    car = exit_sensor.state
+
+    if exit_state == IDLE:
+        if not car:
+            return
+        if bills:
+            exit_bill = bills.pop(0)
+            n_exits += 1
+            revenue += exit_bill["fee"]
+            exit_opened = now
+            exit_state = OPEN
+            move_servo(exit_servo, OPEN_ANGLE)
+            log_event({"event": "gate_exit", "slot": exit_bill["slot"],
+                       "duration_s": exit_bill["duration_s"], "fee": exit_bill["fee"]})
+        else:
+            exit_state = DENIED
+            log_event({"event": "exit_denied", "reason": "no bill"})
+
+    elif exit_state == OPEN:
+        if (time.ticks_diff(now, exit_opened) >= MIN_OPEN
+                and time.ticks_diff(now, exit_sensor.last_seen) >= GATE_CLEAR):
+            move_servo(exit_servo, CLOSED_ANGLE)
+            exit_bill = None
+            exit_state = IDLE
+
+    elif exit_state == DENIED:
+        if not car and time.ticks_diff(now, exit_sensor.last_seen) >= GATE_CLEAR:
+            exit_state = IDLE
 
 
 def update_outputs():
-    free = len(available_slots())
+    free = len(free_bays())
 
-    if gate_state == G_OPEN:
-        set_led_status(False, True, False)
+    if entry_state == OPEN or exit_state == OPEN:
+        lights(False, True, False)
     elif free == 0:
-        set_led_status(False, False, True)
+        lights(False, False, True)
     else:
-        set_led_status(True, False, False)
+        lights(True, False, False)
 
-    lcd_show(0, "Free Slots: {}/{}".format(free, TOTAL_SLOTS))
-    if gate_state == G_OPEN:
-        lcd_show(1, "Go to Bay #{}".format(assigned_bay + 1))
-    elif gate_state == G_DENIED:
-        lcd_show(1, "DENIED: Full!")
+    show(0, "Free Slots: {}/{}".format(free, TOTAL_SLOTS))
+    if entry_state == OPEN:
+        show(1, "Go to Bay #{}".format(next_bay + 1))
+    elif exit_state == OPEN:
+        show(1, "Bay {} Fee Rs {}".format(exit_bill["slot"], exit_bill["fee"]))
+    elif entry_state == DENIED:
+        show(1, "DENIED: Full!")
+    elif exit_state == DENIED:
+        show(1, "No bill found")
     else:
-        lcd_show(1, "{:<8}Cloud:{}".format("FULL!" if free == 0 else "Ready",
-                                           "ON" if mqtt_ok else "--"))
+        show(1, "{:<8}Cloud:{}".format("FULL!" if free == 0 else "Ready",
+                                       "ON" if mqtt_ok else "--"))
 
 
 def step(now):
-    """One pass of the main loop."""
     for i in range(TOTAL_SLOTS):
-        update_slot(i, now)
-        time.sleep_ms(5)            # small gap between sensors to avoid echo cross-talk
-    update_gate_sensor(now)
+        if slots[i].update(now):
+            slot_changed(i)
+        time.sleep_ms(5)            # tiny gap so the sensors don't hear each other
+    entry_sensor.update(now)
+    exit_sensor.update(now)
     expire_reservations(now)
-    run_gate(now)
+    run_entry(now)
+    run_exit(now)
     update_outputs()
-    poll_mqtt()
-    publish_status_if_needed(now)
-    maintain_connection(now)
-
-
-# ==========================================
-# 7. MAIN
-# ==========================================
+    check_phone()
+    send_status(now)
+    reconnect(now)
 
 
 def main():
-    global last_reconnect_ms
-    set_servo_angle(SERVO_CLOSED)
-    set_led_status(False, False, False)
+    global last_reconnect
+    move_servo(entry_servo, CLOSED_ANGLE)
+    move_servo(exit_servo, CLOSED_ANGLE)
+    lights(False, False, False)
 
     lcd.clear()
-    lcd_show(0, "Smart Parking")
-    lcd_show(1, "Connecting WiFi")
+    show(0, "Smart Parking")
+    show(1, "Connecting WiFi")
     if wifi_connect():
         sync_time()
         mqtt_connect()
-    last_reconnect_ms = time.ticks_ms()
+    last_reconnect = time.ticks_ms()
 
     lcd.clear()
-    lcd_cache[0] = lcd_cache[1] = ""
+    lcd_text[0] = lcd_text[1] = ""
 
     while True:
         step(time.ticks_ms())
-        time.sleep_ms(LOOP_DELAY_MS)
+        time.sleep_ms(50)
 
 
 if __name__ == "__main__":

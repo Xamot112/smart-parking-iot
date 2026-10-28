@@ -33,7 +33,13 @@
       "left": -416.9,
       "attrs": { "distance": "400" }
     },
-    { "type": "wokwi-hc-sr04", "id": "ultrasonic2", "top": -75.3, "left": -416.9, "attrs": {} },
+    {
+      "type": "wokwi-hc-sr04",
+      "id": "ultrasonic2",
+      "top": -75.3,
+      "left": -416.9,
+      "attrs": { "distance": "400" }
+    },
     { "type": "wokwi-hc-sr04", "id": "ultrasonic3", "top": 40, "left": -420, "attrs": {} },
     { "type": "wokwi-hc-sr04", "id": "ultrasonic4", "top": 160, "left": -420, "attrs": {} },
     { "type": "wokwi-hc-sr04", "id": "ultrasonic5", "top": 280, "left": -420, "attrs": {} },
@@ -51,7 +57,21 @@
       "left": 200,
       "attrs": { "color": "green" }
     },
-    { "type": "wokwi-led", "id": "led_red", "top": 160, "left": 250, "attrs": { "color": "red" } }
+    { "type": "wokwi-led", "id": "led_red", "top": 160, "left": 250, "attrs": { "color": "red" } },
+    {
+      "type": "wokwi-hc-sr04",
+      "id": "exit_ultrasonic",
+      "top": 150,
+      "left": 312.7,
+      "attrs": { "distance": "400" }
+    },
+    {
+      "type": "wokwi-servo",
+      "id": "servo2",
+      "top": -40.4,
+      "left": 297.6,
+      "attrs": { "hornColor": "blue" }
+    }
   ],
   "connections": [
     [ "esp:GND.1", "lcd1:GND", "black", [ "v-4.8", "h-23.81", "v-585.6" ] ],
@@ -90,7 +110,14 @@
     [ "esp:GND.1", "ultrasonic5:GND", "black", [ "h-14.21", "v100.8", "h-309.1" ] ],
     [ "esp:5V", "ultrasonic5:VCC", "red", [ "v0" ] ],
     [ "esp:4", "ultrasonic5:TRIG", "blue", [ "v0" ] ],
-    [ "esp:17", "ultrasonic5:ECHO", "cyan", [ "v0" ] ]
+    [ "esp:17", "ultrasonic5:ECHO", "cyan", [ "v0" ] ],
+    [ "esp:GND.1", "exit_ultrasonic:GND", "black", [ "v0" ] ],
+    [ "esp:5V", "exit_ultrasonic:VCC", "red", [ "v0" ] ],
+    [ "esp:0", "exit_ultrasonic:TRIG", "blue", [ "v0" ] ],
+    [ "esp:34", "exit_ultrasonic:ECHO", "cyan", [ "v0" ] ],
+    [ "esp:GND.1", "servo2:GND", "black", [ "v0" ] ],
+    [ "esp:5V", "servo2:V+", "red", [ "v0" ] ],
+    [ "esp:23", "servo2:PWM", "purple", [ "v0" ] ]
   ],
   "dependencies": {}
 }
