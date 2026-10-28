@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Reserve a bay</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;700;800&display=swap">
+<style>
+:root{--cream:#FDFBD4;--sand:#D9D7B6;--grey:#878672;--ink:#545333}
+*{box-sizing:border-box}
+body{margin:0;background:var(--sand);color:var(--ink);font:500 16px/1.45 "Plus Jakarta Sans",system-ui,-apple-system,"Segoe UI",Arial,sans-serif;
+  padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom);overflow-x:hidden}
+/* tyre-track marks, a nod to the reference */
+body::before{content:"";position:fixed;top:-20px;right:-6px;width:64px;height:280px;transform:rotate(14deg);pointer-events:none;
+  background:repeating-linear-gradient(0deg,var(--grey) 0 9px,transparent 9px 17px);opacity:.4;z-index:-1}
+main{max-width:420px;margin:0 auto;padding:22px 18px 34px}
+header{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:16px}
+h1{font-size:28px;line-height:1.05;font-weight:800;margin:0;letter-spacing:-.02em}
+#conn{display:flex;align-items:center;gap:7px;font-size:13px;font-weight:700;background:var(--ink);color:var(--cream);padding:8px 13px;border-radius:999px;white-space:nowrap}
+#conn::before{content:"";width:9px;height:9px;border-radius:50%;border:2px solid var(--cream)}
+#conn.on::before{background:var(--cream)}
+.hero{background:var(--ink);color:var(--cream);border-radius:30px;padding:22px 20px;display:flex;justify-content:center}
+.ringwrap{position:relative;width:176px;height:176px}
+.ringwrap svg{width:100%;height:100%;transform:rotate(-90deg)}
+.ringwrap circle{fill:none;stroke-width:11;stroke-linecap:round}
+#track{stroke:var(--grey)}#ring{stroke:var(--cream)}
+.center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center}
+#free{font-size:50px;font-weight:800;line-height:1}
+#of{font-size:13px;font-weight:700;margin-top:3px}
+#bays{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin:14px 0}
+.bay{border-radius:16px;background:var(--cream);border:2px solid var(--cream);padding:10px 0 8px;text-align:center;font-weight:800;font-size:20px}
+.bay small{display:block;font-size:11px;font-weight:700}
+.bay.reserved{background:transparent;border:2px dashed var(--ink)}
+.bay.occupied{background:var(--ink);border-color:var(--ink);color:var(--cream)}
+.bay.mine{outline:3px solid var(--grey);outline-offset:2px}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.stat{border:2px solid var(--grey);border-radius:20px;padding:10px 8px;text-align:center}
+.stat b{display:block;font-size:26px;line-height:1.1;font-weight:800}
+.stat span{font-size:12px;font-weight:700}
+#last{margin:10px 4px 18px;font-size:14px;font-weight:700}
+.book{border-top:2px solid var(--grey);padding-top:18px}
+label{display:block;font-size:13px;font-weight:700;margin:0 0 6px 8px}
+input{width:100%;font:inherit;padding:14px 18px;border-radius:999px;border:2px solid transparent;background:var(--cream);color:var(--ink)}
+input::placeholder{color:var(--grey)}
+button{font:inherit;font-weight:800;border-radius:999px;padding:15px 12px;cursor:pointer;border:2px solid var(--ink);background:transparent;color:var(--ink)}
+button.primary{width:100%;margin-top:12px;background:var(--ink);color:var(--cream);font-size:17px;padding:17px}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
+button:disabled{opacity:.4;cursor:not-allowed}
+:focus-visible{outline:3px solid var(--ink);outline-offset:3px}
+#msg{margin:14px 8px 0;min-height:1.45em;font-weight:700}
+.topic{margin-top:22px}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Reserve<br>a bay</h1>
+    <div id="conn">Connecting…</div>
+  </header>
+
+  <section class="hero" aria-label="Free bays">
+    <div class="ringwrap">
+      <svg viewBox="0 0 120 120" aria-hidden="true">
+        <circle id="track" cx="60" cy="60" r="52"/>
+        <circle id="ring" cx="60" cy="60" r="52" stroke-dasharray="0 327"/>
+      </svg>
+      <div class="center"><div id="free">–</div><div id="of">Waiting for lot</div></div>
+    </div>
+  </section>
+
+  <div id="bays" role="list" aria-label="Parking bays"></div>
+
+  <div class="stats" aria-live="polite">
+    <div class="stat"><b id="sIncome">₹0</b><span>Income</span></div>
+    <div class="stat"><b id="sOut">0</b><span>Cars out</span></div>
+    <div class="stat"><b id="sBills">0</b><span>Heading to exit</span></div>
+  </div>
+  <p id="last">No car has left the lot yet.</p>
+
+  <section class="book">
+    <label for="name">Your name</label>
+    <input id="name" maxlength="12" required autocomplete="off" placeholder="e.g. Arun">
+    <button type="button" id="reserve" class="primary" disabled>Reserve a bay</button>
+    <div class="two">
+      <button type="button" id="arrive" disabled>I’ve arrived</button>
+      <button type="button" id="cancel" disabled>Cancel booking</button>
+    </div>
+    <p id="msg" aria-live="polite"></p>
+  </section>
+
+  <div class="topic">
+    <label for="topic">Lot topic (same as BASE_TOPIC in main.py)</label>
+    <input id="topic" autocomplete="off" placeholder="e.g. my_lot/lot1">
+  </div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const STATES = ["free", "reserved", "occupied"], CIRC = 2 * Math.PI * 52;
+let client = null, topic = "", online = false, lotOffline = false, mySlot = null, lastSlots = null;
+const store = {
+  get: k => { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} }
+};
+
+function setConn(text, on) { $("conn").textContent = text; $("conn").className = on ? "on" : ""; }
+function say(text) { $("msg").textContent = text; }
+function refreshButtons() {
+  const on = online && !lotOffline;
+  ["reserve", "arrive", "cancel"].forEach(id => { $(id).disabled = !on; });
+}
+
+function drawBays(d) {
+  lastSlots = d;
+  const slots = Array.isArray(d.slots) ? d.slots.map(s => STATES.includes(s) ? s : "free") : [];
+  if (mySlot && slots[mySlot - 1] === "free") mySlot = null;     // booking expired or cancelled
+  $("bays").replaceChildren(...slots.map((s, i) => {
+    const mine = i + 1 === mySlot;
+    const el = document.createElement("div");
+    el.className = "bay " + s + (mine ? " mine" : "");
+    el.setAttribute("role", "listitem");
+    el.textContent = i + 1;
+    const label = document.createElement("small");
+    label.textContent = mine ? "yours" : s;
+    el.appendChild(label);
+    return el;
+  }));
+  const total = Number.isInteger(d.total) ? d.total : slots.length;
+  const free = Number.isInteger(d.free) ? d.free : slots.filter(s => s === "free").length;
+  $("free").textContent = free;
+  $("of").textContent = "of " + total + " free";
+  $("ring").setAttribute("stroke-dasharray", (total ? CIRC * free / total : 0) + " " + CIRC);
+  $("sIncome").textContent = "₹" + (Number(d.revenue) || 0);
+  $("sOut").textContent = Number(d.exits) || 0;
+  $("sBills").textContent = Number(d.bills) || 0;
+}
+
+function showExit(d) {
+  const s = Number(d.duration_s) || 0;
+  const t = s < 60 ? s + " s" : Math.round(s / 60) + " min";
+  $("last").textContent = "Last exit: bay " + d.slot + ", parked " + t + ", paid ₹" + (Number(d.fee) || 0) + ".";
+}
+
+function replyText(d) {
+  if (!d.ok) return d.reason === "lot full" ? "Lot is full." : "Could not complete: " + (d.reason || "unknown reason") + ".";
+  if (d.note === "cancelled") return "Booking cancelled.";
+  if (d.note === "drive to the gate") return "Checked in. Drive to the gate, bay " + d.slot + " is waiting.";
+  if (d.note === "already booked") return "You already have bay " + d.slot + ".";
+  return "Bay " + d.slot + " is yours" + (d.hold_s ? " for " + Math.round(d.hold_s / 60) + " minutes." : ".");
+}
+
+function onMessage(t, buf) {
+  const text = buf.toString();
+  if (t === topic + "/status") {
+    lotOffline = text === "offline";
+    setConn(lotOffline ? "Lot offline" : "Connected", !lotOffline);
+    refreshButtons();
+    return;
+  }
+  let d;
+  try { d = JSON.parse(text); } catch (e) { return; }
+  if (!d || typeof d !== "object") return;
+  if (t === topic + "/slots") drawBays(d);
+  else if (t === topic + "/events") { if (d.event === "gate_exit") showExit(d); }
+  else if (t === topic + "/reply" && d.name === $("name").value.trim()) {
+    if (!d.ok || d.note === "cancelled") mySlot = null;
+    else if (Number.isInteger(d.slot)) mySlot = d.slot;
+    say(replyText(d));
+    if (lastSlots) drawBays(lastSlots);
+  }
+}
+
+function connect(value) {
+  topic = value.trim().replace(/\/+$/, "");
+  if (!topic) return;
+  store.set("pk_topic", topic);
+  if (client) client.end(true);
+  online = false; lotOffline = false; mySlot = null; refreshButtons(); setConn("Connecting…", false);
+  const c = client = mqtt.connect("wss://broker.hivemq.com:8884/mqtt",
+    { clientId: "bay-" + Math.random().toString(16).slice(2, 10) });
+  c.on("connect", () => {
+    if (c !== client) return;
+    c.subscribe(["slots", "reply", "status", "events"].map(s => topic + "/" + s));
+    online = true; setConn(lotOffline ? "Lot offline" : "Connected", !lotOffline); refreshButtons();
+  });
+  c.on("close", () => { if (c === client) { online = false; setConn("Connecting…", false); refreshButtons(); } });
+  c.on("message", (t, buf) => { if (c === client) onMessage(t, buf); });
+}
+
+function send(action) {
+  const name = $("name").value.trim();
+  if (!name) { say("Enter your name first."); $("name").focus(); return; }
+  store.set("pk_name", name);
+  client.publish(topic + "/reserve", JSON.stringify({ action, name }));
+  say("Sent. Waiting for the lot…");
+}
+
+$("reserve").onclick = () => send("reserve");
+$("arrive").onclick = () => send("arrive");
+$("cancel").onclick = () => send("cancel");
+$("topic").addEventListener("change", e => connect(e.target.value));
+
+$("name").value = store.get("pk_name") || "";
+$("topic").value = new URLSearchParams(location.search).get("topic") || store.get("pk_topic") || "";
+if ($("topic").value) connect($("topic").value);
+else setConn("Enter the lot topic", false);
+</script>
+</body>
+</html>
